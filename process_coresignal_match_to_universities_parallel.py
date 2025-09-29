@@ -1,5 +1,5 @@
-#grid_run --grid_mem=120g --grid_ncpus=10 /user/jag2367/.conda/envs/jgpriv/bin/python ../process_coresignal_match_to_universities_parallel.py
-#grid_run --grid_mem=60g --grid_ncpus=6 --grid_submit=batch --grid_array=1-5 /user/jag2367/.conda/envs/jgpriv/bin/python ../process_coresignal_match_to_universities_parallel.py
+#
+#grid_run --grid_mem=60g --grid_ncpus=6 --grid_submit=batch --grid_array=1-5 /user/jag2367/.conda/envs/jgpriv/bin/python process_coresignal_match_to_universities_parallel.py
 
 import pdb 
 import pandas as pd
@@ -13,6 +13,15 @@ import os
 from rapidfuzz.distance import Levenshtein
 import datetime
 
+
+
+PARAMETERS = {
+    'graduation_year_start': 1995,
+    'graduation_year_end': 2001,
+    'output_file_prefix': 'linkedin_profiles_coresignal_matched_before_2002',
+    'full_process_chunk_size': 8_000_000,  # Number of rows to process in one go
+    'file_read_chunk_size': 100_000  # Number of rows to read at a time from CSV
+}
 
 os.chdir('/shared/share_scp/coresignal')
 #os.chdir('..')
@@ -66,7 +75,7 @@ def clean_university_list(uni_list, name_col):
 
 
 
-def read_education_file_filter_to_school_years(chunk_data):
+def read_education_file_filter_to_school_years(chunk_data, start_year=PARAMETERS['graduation_year_start'], end_year=PARAMETERS['graduation_year_end']):
     '''
     Filters the education data to include only records with 'year_from' or 'year_to' between 2002 and 2008.
     '''
@@ -75,7 +84,9 @@ def read_education_file_filter_to_school_years(chunk_data):
     edu_df['year_to'] = pd.to_numeric(edu_df['date_to'], errors='coerce').astype('Int64')
     edu_df = edu_df.dropna(subset=['year_from', 'year_to'])
     edu_df = edu_df.reset_index(drop=True)
-    edu_df = edu_df[(edu_df.year_from.between(2002, 2008)) | (edu_df.year_to.between(2002, 2008))]
+    
+    ### Updated to be only based on year_to edu_df = edu_df[(edu_df.year_from.between(start_year, end_year)) | (edu_df.year_to.between(start_year, end_year))]
+    edu_df = edu_df[(edu_df.year_to.between(start_year, end_year))]
 
     return edu_df
 
@@ -214,14 +225,14 @@ def match_by_tags_and_clean_name(universities_adopted_facebook, linkedin_matches
 
 
 
-def process_education_relation_file_large_chunk(csv_path, start_row=0, full_process_chunk_size=4_000_000 ,process_chunk_id=None, default_num_rows=None):
+def process_education_relation_file_large_chunk(csv_path, start_row=0, full_process_chunk_size=PARAMETERS['full_process_chunk_size'], process_chunk_id=None, default_num_rows=None):
     '''
     Gets the education file to keep only those that match to the right universities and years of study,
     to then develop a dataset of their linkedin profiles
     '''
-    global debug_mode , debug_var_total_rows , debug_var_time_elapsed_matching
+    global debug_mode , debug_var_total_rows , debug_var_time_elapsed_matching, PARAMETERS
 
-    chunk_size = 40000
+    chunk_size = PARAMETERS['file_read_chunk_size']
     university_urls_keep = []
     university_urls_remove = []
     university_urls_to_unitid_correspondence = pd.DataFrame()
@@ -253,7 +264,7 @@ def process_education_relation_file_large_chunk(csv_path, start_row=0, full_proc
     )
     if debug_mode: print("Iterator opened")
 
-    pickle_path = csv_path.replace('.csv', f'_linkedin_matches_processed__START-{start_row}__SIZE-{full_process_chunk_size}.pkl')
+    pickle_path = csv_path.replace('.csv', f'{PARAMETERS["output_file_prefix"]}_START-{start_row}__SIZE-{full_process_chunk_size}.pkl')
     processed_row_count = 0
     included_row_count = 0
 
@@ -307,7 +318,7 @@ def process_education_relation_file_large_chunk(csv_path, start_row=0, full_proc
 
 
 
-def parallel_process_by_large_chunks(csv_path,  chunk_size=4_000_000, max_workers=6):
+def parallel_process_by_large_chunks(csv_path,  chunk_size=PARAMETERS['full_process_chunk_size'], max_workers=6):
 
     print(f"Estimating the number of rows in file {csv_path}")
     # Efficiently get total rows in the file (excluding header)
