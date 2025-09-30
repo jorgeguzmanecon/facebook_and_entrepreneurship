@@ -1,6 +1,6 @@
 #Run under /shared/share_scp/coresignal/code_run
-#grid_run --grid_mem=60g --grid_ncpus=6 --grid_submit=batch --grid_array=1-5 /user/jag2367/.conda/envs/jgpriv/bin/python ../gitrepo_facebook/process_coresignal_match_to_universities_parallel.py
-#grid_run --grid_mem=60g --grid_ncpus=6 --grid_submit=batch --grid_array=1-5 /user/jag2367/.conda/envs/jgpriv/bin/python  ../gitrepo_facebook/process_coresignal_match_to_universities_parallel.py --graduation_year_start=2009 --graduation_year_end=2015
+#grid_run --grid_mem=60g --grid_ncpus=6 --grid_submit=batch --grid_array=1-4 /user/jag2367/.conda/envs/jgpriv/bin/python ../gitrepo_facebook/process_coresignal_match_to_universities_parallel.py
+#grid_run --grid_mem=60g --grid_ncpus=6 --grid_submit=batch --grid_array=1-4 /user/jag2367/.conda/envs/jgpriv/bin/python  ../gitrepo_facebook/process_coresignal_match_to_universities_parallel.py --graduation_year_start=1997 --graduation_year_end=2011
 #grid_run --grid_mem=60g --grid_ncpus=6  /user/jag2367/.conda/envs/jgpriv/bin/python ../gitrepo_facebook/process_coresignal_match_to_universities_parallel.py --graduation_year_start=2009 --graduation_year_end=2015
 
 import pdb 
@@ -15,6 +15,7 @@ import os
 from rapidfuzz.distance import Levenshtein
 import datetime
 import sys
+from university_name_matcher import university_name_matcher
 
 
 ########
@@ -57,6 +58,8 @@ PARAMETERS = {
 update_parameters_from_argv()
 
 PARAMETERS['output_file_prefix'] = PARAMETERS['output_file_prefix_base'] + f'--_school_end_{PARAMETERS["graduation_year_start"]}_to_{PARAMETERS["graduation_year_end"]}'  
+
+umatcher = university_name_matcher()
 #
 # End of code setup
 ########
@@ -68,53 +71,8 @@ PARAMETERS['output_file_prefix'] = PARAMETERS['output_file_prefix_base'] + f'--_
 
 #os.chdir('..')
 # Load the list of universities with their geographic coordinates
-universities_adopted_facebook = pd.read_stata('universities_geo_for_jorge.dta')
+universities_adopted_facebook = umatcher.load_university_data() 
 
-# Split 'instnm' into words and count their incidence>q
-words = universities_adopted_facebook['instnm'].str.lower().str.split().explode()
-word_counts = Counter(words)
-word_counts_df = pd.DataFrame(word_counts.most_common(), columns=['word', 'count'])
-word_counts_df = word_counts_df[word_counts_df['word'].str.len() > 3]
-top_10_tags = word_counts_df.head(10)
-
-
-
-def clean_university_list(uni_list, name_col):
-    '''
-    Cleans the university list by extracting tags from the institution names and creating a clean name without those tags.
-    The tags are derived from the top 10 most common words in the institution names.
-    The 'instnm' column is expected to contain the institution names.
-    '''
-
-    global top_10_tags
-
-    # Create 'tags' column: list of tags found in each university name
-    uni_list['tags'] = uni_list[name_col].str.lower().apply(
-        lambda x: [tag for tag in top_10_tags['word'].tolist() if pd.notnull(x) and tag in str(x)]
-    )
-    # Sort tags alphabetically and convert to lowercase
-    uni_list['tags'] = uni_list['tags'].apply(
-        lambda tag_list: sorted([tag.lower() for tag in tag_list])
-    )
-    # Create 'clean_name' column: remove tags from 'instnm'
-    def remove_tags(name, tags):
-        for tag in tags:
-            name = name.replace(tag, '').strip()
-        # Remove extra spaces
-        name = ' '.join(name.split())
-        return name
-
-    try:
-        uni_list['clean_name'] = uni_list.apply(
-            lambda row: remove_tags(str(row[name_col]).lower() if pd.notnull(row[name_col]) else '', row['tags']),
-            axis=1
-        )
-    except ValueError:
-
-        print("VALUE ERROR -- IGNORING ")
-        return None
-
-    return uni_list
 
 
 
@@ -179,17 +137,26 @@ def match_education_file_to_universities(
     
 
     unique_title_school_url = linkedin_matches[['title', 'school_url']].drop_duplicates()
-    unique_title_school_url = clean_university_list(unique_title_school_url, 'title')
-    universities_adopted_facebook = clean_university_list(universities_adopted_facebook, 'instnm')
 
     if universities_adopted_facebook is None:
         return None, None, None, None
 
     if debug_mode: print("Matching universities by tags and clean name with score cutoff:", score_cutoff)
-    url_matches = match_by_tags_and_clean_name(
+    url_matches = umatcher.match_by_tags_and_clean_name(
         universities_adopted_facebook, unique_title_school_url, score_cutoff=score_cutoff
     )
     if debug_mode: print("Matching done")
+
+
+    # If no matches found, return early
+    if (
+        url_matches is None or 
+        url_matches.shape[0] == 0 or 
+        'school_url' not in url_matches.columns
+    ):
+        if debug_mode: print("No matches found in this pass")
+        return None, None, None, None
+
 
     for url in url_matches.school_url.unique():
         if url not in university_urls_keep:
@@ -202,7 +169,7 @@ def match_education_file_to_universities(
             university_urls_remove.append(url)
 
     
-    linkedin_matches_to_return = linkedin_matches[linkedin_matches['keep']].drop_duplicates(subset=['member_id', 'school_url','date_from', 'date_to'])
+    linkedin_matches_to_return = linkedin_matches[linkedin_matches['keep']].drop_duplicates(subset=['id'])
 
     if debug_mode: print("Total matches to return in this pass (before adding unitid):", linkedin_matches_to_return.shape[0])
     linkedin_matches_to_return, university_urls_to_unitid_correspondence = matching_add_university_unitid(linkedin_matches_to_return, 
@@ -212,61 +179,6 @@ def match_education_file_to_universities(
     return linkedin_matches_to_return, university_urls_keep, university_urls_remove, university_urls_to_unitid_correspondence
 
 
-
-
-
-
-def match_by_tags_and_clean_name(universities_adopted_facebook, linkedin_matches, score_cutoff=70):
-    """
-    Match rows between universities_adopted_facebook and linkedin_matches based on:
-      (a) Exact match on 'tags' (as tuple or string)
-      (b) Levenshtein similarity on 'clean_name' >= score_cutoff
-      (c) Keep only the best match for each linkedin_matches row
-    Returns a DataFrame with the best matches.
-    """
-
-    global debug_mode , debug_var_time_elapsed_matching
-
-    if debug_mode: print("\tmatching: preparing data")
-    # Ensure tags are comparable (convert lists to tuples or strings)
-    ua = universities_adopted_facebook.copy()
-    lm = linkedin_matches.copy()
-    ua['tags_str'] = ua['tags'].apply(lambda x: ','.join(sorted(map(str, x))))
-    lm['tags_str'] = lm['tags'].apply(lambda x: ','.join(sorted(map(str, x))))
-
-    if debug_mode: print("\tmatching: filtering to rows with matched tags")
-    # Filter to only rows with matching tags
-    merged = lm.merge(ua, on='tags_str', suffixes=('_lm', '_ua'))
-
-    start_time = datetime.datetime.now()
-    
-    if debug_mode: print("\tmatching: computing levenshtein distance")
-    # Compute Levenshtein similarity for clean_name
-    # Use rapidfuzz for much faster Levenshtein similarity calculation
-
-    merged['lev_score'] = [
-        Levenshtein.normalized_similarity(str(lm), str(ua)) * 100
-        for lm, ua in zip(merged['clean_name_lm'], merged['clean_name_ua'])
-    ]
-    
-    end_time = datetime.datetime.now()
-    elapsed = end_time - start_time    
-    debug_var_time_elapsed_matching += elapsed.total_seconds()  # Convert to seconds
-    if debug_mode: print(f"\tmatching: time elapsed {str(elapsed).split('.')[0]} (hh:mm:ss)")
-
-    if debug_mode: print("\tmatching: filtering based on cutoff")
-    
-    merged = merged[merged['lev_score'] >= score_cutoff]
-
-    if debug_mode: print("\tmatching: getting the best matches")
-    # For each linkedin_matches row, keep only the best match (highest lev_score)
-    merged = merged.sort_values('lev_score', ascending=False)
-    best_matches = merged.groupby(['clean_name_lm'], as_index=False).first()
-
-    return best_matches
-
-# Example usage:
-# best_matches = match_by_tags_and_clean_name(universities_adopted_facebook, linkedin_matches, score_cutoff=70)
 
 
 

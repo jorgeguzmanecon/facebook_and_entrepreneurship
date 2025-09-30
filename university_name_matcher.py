@@ -19,6 +19,9 @@ class university_name_matcher:
         Load the university data from the Stata file.
         '''
         self.universities_adopted_facebook = pd.read_stata('universities_geo_for_jorge.dta')
+        # Remove all universities with names that repeat more than once as it would not be possible to match
+        self.universities_adopted_facebook = self.universities_adopted_facebook[~self.universities_adopted_facebook['instnm'].duplicated(keep=False)]
+
         return self.universities_adopted_facebook
 
         # Load the dataset
@@ -83,14 +86,19 @@ class university_name_matcher:
         (c) Keep only the best match for each linkedin_matches row
         Returns a DataFrame with the best matches.
         """
+        if universities_adopted_facebook is None or linkedin_matches is None:
+            return pd.DataFrame()  # Return empty DataFrame if inputs are None
+
 
         debug_mode = True
         debug_var_time_elapsed_matching = 0
 
-        if(self.top_10_tags is None):
-            self.common_tags_to_remove()
-        if(self.universities_adopted_facebook is None):
+        if (self.universities_adopted_facebook is None):
             self.load_university_data()
+
+ 
+        if (self.top_10_tags is None):
+            self.common_tags_to_remove()
         #universities_adopted_facebook = self.clean_university_list(universities_adopted
         #top_10_tags = self.top_10_tags
 
@@ -99,6 +107,10 @@ class university_name_matcher:
         # Ensure tags are comparable (convert lists to tuples or strings)
         ua = self.clean_university_list(universities_adopted_facebook.copy(), 'instnm')
         lm = self.clean_university_list(linkedin_matches.copy(), 'title')
+
+        if ua is None or lm is None:
+            return pd.DataFrame()  # Return empty DataFrame if cleaning failed
+        
         ua['tags_str'] = ua['tags'].apply(lambda x: ','.join(sorted(map(str, x))))
         lm['tags_str'] = lm['tags'].apply(lambda x: ','.join(sorted(map(str, x))))
 
@@ -127,8 +139,8 @@ class university_name_matcher:
         merged = merged[merged['lev_score'] >= score_cutoff]
 
         if debug_mode: print("\tmatching: getting the best matches")
-        # For each linkedin_matches row, keep only the best match (highest lev_score)
-        merged = merged.sort_values('lev_score', ascending=False)
-        best_matches = merged.groupby(['clean_name_lm'], as_index=False).first()
+       
+        #Group by individual records and keep the best match
+        best_matches = merged.sort_values('lev_score', ascending=False).groupby(['clean_name_lm'], as_index=False).first()
 
         return best_matches
