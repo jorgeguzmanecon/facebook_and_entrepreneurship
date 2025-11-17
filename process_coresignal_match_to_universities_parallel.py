@@ -1,7 +1,8 @@
 #Run under /shared/share_scp/coresignal/code_run
 #grid_run --grid_mem=60g --grid_ncpus=6 --grid_submit=batch --grid_array=1-4 /user/jag2367/.conda/envs/jgpriv/bin/python ../gitrepo_facebook/process_coresignal_match_to_universities_parallel.py
 #grid_run --grid_mem=60g --grid_ncpus=6 --grid_submit=batch --grid_array=1-4 /user/jag2367/.conda/envs/jgpriv/bin/python  ../gitrepo_facebook/process_coresignal_match_to_universities_parallel.py --graduation_year_start=1997 --graduation_year_end=2011
-#grid_run --grid_mem=60g --grid_ncpus=6  /user/jag2367/.conda/envs/jgpriv/bin/python ../gitrepo_facebook/process_coresignal_match_to_universities_parallel.py --graduation_year_start=2009 --graduation_year_end=2015
+#grid_run --grid_mem=60g --grid_ncpus=6  /user/jag2367/.conda/envs/jgpriv/bin/python ../gitrepo_facebook/process_coresignal_match_to_universities_parallel.py --graduation_year_start=1997 --graduation_year_end=2011 --threaded_execution=False --debug_mode=True
+#grid_run --grid_mem=60g --grid_ncpus=6  /user
 
 import pdb 
 import pandas as pd
@@ -53,7 +54,8 @@ PARAMETERS = {
     'output_file_folder': 'processed_data2',
     'debug_mode': False,  # Set to True to enable debug prints
     'full_process_chunk_size': 8_000_000,  # Number of rows to process in one go
-    'file_read_chunk_size': 100_000  # Number of rows to read at a time from CSV
+    'file_read_chunk_size': 100_000,  # Number of rows to read at a time from CSV
+    'threaded_execution': True  # Whether to use concurrent processing
 }
 update_parameters_from_argv()
 
@@ -75,6 +77,8 @@ universities_adopted_facebook = umatcher.load_university_data()
 
 
 
+
+log = pd.DataFrame()
 
 
 
@@ -175,6 +179,8 @@ def match_education_file_to_universities(
     linkedin_matches_to_return, university_urls_to_unitid_correspondence = matching_add_university_unitid(linkedin_matches_to_return, 
                                                                                                           url_matches, 
                                                                                                           university_urls_to_unitid_correspondence)
+
+    linkedin_matches_to_return = umatcher.add_instnm(linkedin_matches_to_return)
     if debug_mode: print("Total matches to return in this pass (after adding unitid):", linkedin_matches_to_return.shape[0])
     return linkedin_matches_to_return, university_urls_keep, university_urls_remove, university_urls_to_unitid_correspondence
 
@@ -320,7 +326,6 @@ def parallel_process_by_large_chunks(csv_path,  chunk_size=PARAMETERS['full_proc
 import concurrent.futures
 
 #parameters
-run_concurrent_files = True # Set to True to run in parallel, False is necessary fro debugging
 debug_mode = PARAMETERS['debug_mode'] # if true prints a bunch of messages
 debug_var_total_rows = 0
 debug_var_time_elapsed_matching = 0
@@ -355,7 +360,7 @@ if __name__ == "__main__":
         print(f"SGE_TASK_ID not provided. Processing all files.")
         
 
-    if run_concurrent_files is True:
+    if PARAMETERS['threaded_execution'] is True:
        for csv_path in csv_files:
                 parallel_process_by_large_chunks(csv_path, max_workers=5)
   

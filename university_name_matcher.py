@@ -14,14 +14,39 @@ class university_name_matcher:
         debug_mode = False
         debug_var_time_elapsed_matching = 0.0
 
+
+
+    def add_instnm(self, df):
+        '''
+        Adds the 'instnm' (institution name) column to the given DataFrame by merging on 'unitid'.
+        '''
+        if self.universities_adopted_facebook is None:
+            self.load_university_data()
+        
+        df = df.merge(
+            self.universities_adopted_facebook[['unitid', 'instnm']],
+            on='unitid',
+            how='left'
+        )
+        return df
+    
+
     def load_university_data(self):
         '''
         Load the university data from the Stata file.
         '''
         self.universities_adopted_facebook = pd.read_stata('universities_geo_for_jorge.dta')
+        
+        print(f"Loaded {self.universities_adopted_facebook.shape[0]} universities from the dataset")
+        
         # Remove all universities with names that repeat more than once as it would not be possible to match
-        self.universities_adopted_facebook = self.universities_adopted_facebook[~self.universities_adopted_facebook['instnm'].duplicated(keep=False)]
 
+        dup_instnm = self.universities_adopted_facebook[self.universities_adopted_facebook['instnm'].duplicated()].instnm
+        self.universities_adopted_facebook = self.universities_adopted_facebook[~self.universities_adopted_facebook['instnm'].isin(dup_instnm)] 
+
+        print(f"Kept {self.universities_adopted_facebook.shape[0]} unique universities after removing duplicates")
+
+        
         return self.universities_adopted_facebook
 
         # Load the dataset
