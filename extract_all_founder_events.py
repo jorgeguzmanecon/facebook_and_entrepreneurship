@@ -56,7 +56,8 @@ def process_experience_file_large_chunk( csv_path, start_row=0, full_process_chu
             counter += 1
             print(f"Process {process_chunk_id}: chunk_number {counter}", flush=True)
             
-            mask = chunk['company_url'].notna() & chunk['title'].str.contains('founder', case=False, na=False, regex=False)
+            mask = chunk['company_url'].notna() & (chunk['title'].str.contains('founder', case=False, na=False, regex=False) | 
+                                                   chunk['title'].str.contains('owner', case=False, na=False, regex=False))
             chunk_filtered = chunk[mask]
             experience_matches = pd.concat([chunk_filtered, experience_matches], axis=0, ignore_index=True)
                     
@@ -64,6 +65,8 @@ def process_experience_file_large_chunk( csv_path, start_row=0, full_process_chu
             if (counter % 10 == 0) and not experience_matches.empty:                    
                 print(f"Process {process_chunk_id}: Saving progress to {output_path}", flush=True)
                 experience_matches.to_pickle(output_path)
+    except StopIteration:
+        print(f"Process {process_chunk_id}: Iterator exhausted normally at chunk {counter}", flush=True)
     except pd.errors.ParserError as e:
         print(f"Process {process_chunk_id}: ParserError encountered at chunk {counter}: {e}", flush=True)
         print(f"Process {process_chunk_id}: Continuing with data processed so far ({len(experience_matches)} rows)", flush=True)
@@ -95,8 +98,8 @@ def process_experience_file(csv_path, count_total_rows=False, max_workers=10, ru
         total_rows = i - 1  # subtract header
         print(f"{total_rows:,} rows found", flush=True)
     else:
-        total_rows = 603193546
-        print(f"Skipping estimates of total rows, using default value {603193546:,}", flush=True)
+        total_rows = 603_193_546
+        print(f"Skipping estimates of total rows, using default value {603_193_546:,}", flush=True)
 
 
     
@@ -105,7 +108,7 @@ def process_experience_file(csv_path, count_total_rows=False, max_workers=10, ru
     chunk_counter = 0
     latest_chunk = None
 
-    large_chunk_size = 5_000_000  # Adjusted chunk size for better performance
+    large_chunk_size = 1_000_000  # Adjusted chunk size for better performance
 
 
     
@@ -113,7 +116,7 @@ def process_experience_file(csv_path, count_total_rows=False, max_workers=10, ru
         chunk_id = 0      
         for start_row in range(0, total_rows, large_chunk_size):
             chunk_id += 1
-            pdb.set_trace()
+            #pdb.set_trace()
             process_experience_file_large_chunk(csv_path, start_row, large_chunk_size, chunk_id)
 
     else:
@@ -122,7 +125,7 @@ def process_experience_file(csv_path, count_total_rows=False, max_workers=10, ru
             
             chunk_id = 0
             for start_row in range(0, total_rows, large_chunk_size):
-                future = executor.submit(process_experience_file_large_chunk, csv_path, start_row, large_chunk_size, chunk_id,member_ids)
+                future = executor.submit(process_experience_file_large_chunk, csv_path, start_row, large_chunk_size, chunk_id)
                 futures.append(future)
                 chunk_id += 1
 
@@ -164,8 +167,15 @@ if __name__ == "__main__":
     else:
         print(f"SGE_TASK_ID not provided. Processing all files.", flush=True)
         
-
+    
     count_total_rows = not run_single_process
+    max_workers = 6
+
+
+#    Process each experience file
+    run_single_process = False #debugging, remove
+    sge_task_id = 1 #debugging, remove
+
     for csv_path in experience_files:
         print(f"Processing file: {csv_path} with run_single_process={run_single_process} and count_total_rows={count_total_rows}", flush=True)
-        process_experience_file(csv_path,count_total_rows=count_total_rows, max_workers=6, run_single_process=run_single_process)
+        process_experience_file(csv_path,count_total_rows=count_total_rows, max_workers=max_workers, run_single_process=run_single_process)
