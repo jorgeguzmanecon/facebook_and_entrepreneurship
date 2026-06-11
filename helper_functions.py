@@ -42,6 +42,9 @@ def to_pickle_split_by_size(
     Because compression ratios vary, this function estimates chunk sizes
     dynamically based on the actual compressed size of each written file.
     """
+    if globals().get("SAVE_FILES_TO_REPO") is not True:
+        print(f"Skipping save to {base_path}: SAVE_FILES_TO_REPO is not True")
+        return []
 
     max_bytes = max_size_gb * 1024**3 * safety
     n = len(df)
@@ -86,7 +89,7 @@ def to_pickle_split_by_size(
 
         print(
             f"Saved {out}: rows {start:,} to {end:,} "
-            f"({file_size / 1024**3:.2f} GB)"`
+            f"({file_size / 1024**3:.2f} GB)"
         )
 
         rows_written = end - start
