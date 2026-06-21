@@ -59,6 +59,8 @@ class Config:
 
     company_scores_path: str = "/shared/share_scp/coresignal/company_marketing_scores_latest.pkl"
     companies_csv_path: str = "/shared/share_scp/coresignal/coresignal_company.csv"
+    member_csv_1_path: str = "/shared/share_scp/coresignal/coresignal_member_1.csv"
+    member_csv_2_path: str = "/shared/share_scp/coresignal/coresignal_member_2.csv"
 
 
 def section(title: str) -> None:
@@ -747,6 +749,131 @@ def apply_isaac_filter(all_experience: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# -----------------------------
+# 4.x Add categorical gender prediction from first name
+# -----------------------------
+def add_pred_female_from_member_csvs(cfg: Config, all_experience: pd.DataFrame) -> pd.DataFrame:
+    section("4.x Add pred_female from coresignal_member CSVs")
+    out = all_experience.copy()
+
+    valid_categories = [
+        "female",
+        "mostly_female",
+        "androgynous",
+        "mostly_male",
+        "male",
+        "unknown",
+    ]
+
+    if "member_id" not in out.columns:
+        out["pred_female"] = pd.Categorical(
+            ["unknown"] * len(out),
+            categories=valid_categories,
+        )
+        return out
+
+    member_paths = [cfg.member_csv_1_path, cfg.member_csv_2_path]
+    missing_paths = [p for p in member_paths if not os.path.exists(p)]
+
+    if missing_paths:
+        out["pred_female"] = pd.Categorical(
+            ["unknown"] * len(out),
+            categories=valid_categories,
+        )
+        return out
+
+    frames: list[pd.DataFrame] = []
+
+    for path in member_paths:
+        frame = pd.read_csv(path, usecols=["id", "first_name"])
+        frames.append(frame)
+
+    members = pd.concat(frames, ignore_index=True)
+    members = members.rename(columns={"id": "member_id"})
+
+    members["member_id"] = pd.to_numeric(
+        members["member_id"],
+        errors="coerce",
+    ).astype("Int64")
+
+    members["first_name"] = (
+        members["first_name"]
+        .astype("string")
+        .fillna("")
+        .str.strip()
+    )
+
+    # Do not delete observations from out.
+    # This only removes unusable member lookup rows before merging.
+    members = members[members["member_id"].notna()].copy()
+    members = members.drop_duplicates(subset=["member_id"], keep="first")
+
+    try:
+        import gender_guesser.detector as gender
+    except ImportError as exc:
+        raise ImportError(
+            "gender-guesser is required for pred_female. "
+            "Install with: conda run -n jgpriv pip install gender-guesser"
+        ) from exc
+
+    detector = gender.Detector(case_sensitive=False)
+
+    first_name_token = (
+        members["first_name"]
+        .fillna("")
+        .astype("string")
+        .str.strip()
+        .str.split()
+        .str[0]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    # Keep only valid strings for prediction.
+    # This does not drop rows from members or out.
+    unique_names = pd.Index(
+        first_name_token[
+            (first_name_token != "")
+            & (~first_name_token.str.lower().isin({"nan", "none", "<na>"}))
+        ].unique()
+    )
+
+    pred_map: dict[str, str] = {}
+
+    for nm in unique_names:
+        nm_clean = str(nm).strip()
+
+        if nm_clean == "" or nm_clean.lower() in {"nan", "none", "<na>"}:
+            pred = "unknown"
+        else:
+            pred = detector.get_gender(nm_clean)
+
+        pred_map[nm_clean] = pred if pred in valid_categories else "unknown"
+
+    members["pred_female"] = first_name_token.map(pred_map).fillna("unknown")
+    members["pred_female"] = pd.Categorical(
+        members["pred_female"],
+        categories=valid_categories,
+    )
+
+    members = members[["member_id", "pred_female"]]
+
+    out = out.merge(members, on="member_id", how="left")
+
+    out["pred_female"] = (
+        out["pred_female"]
+        .astype("string")
+        .fillna("unknown")
+    )
+
+    out["pred_female"] = pd.Categorical(
+        out["pred_female"],
+        categories=valid_categories,
+    )
+
+    return out
+    
 # =============================
 # Save helper
 # =============================
@@ -815,6 +942,7 @@ class SectionProcessors:
     def run_section_4(self, all_experience: pd.DataFrame) -> pd.DataFrame:
         section("Pipeline Section 4")
         all_experience = apply_isaac_filter(all_experience)
+        all_experience = add_pred_female_from_member_csvs(self.cfg, all_experience)
         self.repository.persist_all_experience(all_experience)
         return all_experience
 

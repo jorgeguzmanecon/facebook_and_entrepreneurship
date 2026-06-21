@@ -96,9 +96,36 @@ class DataRepository:
         print(f"Saved: {path}")
         return path
 
+    def rename_columns_before_save(self, df):
+     #rename variables to shorter names and drop some variables
+        df_save = df.copy()
+        
+        #remove the employee columns
+        df_save = df_save.drop(columns=[col for col in df_save.columns if 'employee' in col.lower()])
+
+        #remove the company founder columns
+        df_save = df_save.drop(columns=[col for col in df_save.columns if re.match(r"^company.*found.*", col.lower())])
+
+        df_save = df_save.drop(columns=[col for col in df_save.columns if "company_founder_start_year" in col.lower()])
+
+        #rename columns: "founder_or_owner" to "found_or_own" and "_years" to "yrs"
+        df_save.columns = (
+            df_save.columns
+            .str.replace("founder_or_owner", "found_or_own", regex=False)
+            .str.replace("_years", "y", regex=False)
+            .str.replace("is_cofounder_or_coowner","cofound_or_coown", regex=False)
+
+        )
+
+        return df_save
+
     def save_graduates_person_level_stata(self, df: pd.DataFrame, today_str: str) -> str:
+        
         path = f"graduates_person_level_{today_str}.dta"
-        df.to_stata(path, version=118, write_index=False)
+
+        print(f">> Saving file {path}.")
+        df_save = self.rename_columns_before_save(df)
+        df_save.to_stata(path, version=118, write_index=False)
         print(f"Saved: {path}")
         return path
 
@@ -109,7 +136,10 @@ class DataRepository:
         variable_labels: dict[str, str],
     ) -> str:
         path = f"graduates_person_level_with_labels_{today_str}.dta"
-        df.to_stata(path, variable_labels=variable_labels, version=118, write_index=False)
+        print(f">> Saving file {path}.")
+
+        df_save = self.rename_columns_before_save(df)
+        df_save.to_stata(path, variable_labels=variable_labels, version=118, write_index=False)
         print(f"Saved: {path}")
         return path
 
@@ -405,7 +435,7 @@ class CofounderBuilder:
         section("3 Create cofounder dataset")
 
         mask = (~graduates_with_education_job_level["company_url"].isna()) & (
-            graduates_with_education_job_level["is_founder_or_owner_5_years"] == True
+            graduates_with_education_job_level["is_founder_or_owner_5_years_o"] == True
         )
         graduate_founders = graduates_with_education_job_level[mask].copy()
         print(f"Graduate founders rows: {len(graduate_founders):,}")
