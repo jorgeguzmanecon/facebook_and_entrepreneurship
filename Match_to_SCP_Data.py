@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import pdb
 import re
+import time
 from dataclasses import dataclass
 
 import pandas as pd
@@ -34,6 +36,18 @@ DROP_TOKENS = {
     "gmbh", "ag", "sa", "sas", "sarl", "bv", "nv",
     "pte", "pty", "oy", "ab", "as",
 }
+
+
+def format_elapsed(seconds: float) -> str:
+    """Format elapsed time as human-readable string."""
+    if seconds < 60:
+        return f"{seconds:.2f}s"
+    elif seconds < 3600:
+        minutes = seconds / 60
+        return f"{minutes:.2f}m"
+    else:
+        hours = seconds / 3600
+        return f"{hours:.2f}h"
 
 
 @dataclass(frozen=True)
@@ -76,8 +90,12 @@ def build_config(args: argparse.Namespace) -> Config:
 
 
 def load_data(cfg: Config) -> tuple[pd.DataFrame, pd.DataFrame]:
+    start = time.time()
     print("Loading all_experience:", cfg.all_experience_path)
     all_experience = pd.read_pickle(cfg.all_experience_path)
+    print(f"  Loaded in {format_elapsed(time.time() - start)}")
+    
+    start = time.time()
     print("Loading SCP data:", cfg.scp_path)
     scp_data = pd.read_csv(
         cfg.scp_path,
@@ -85,13 +103,17 @@ def load_data(cfg: Config) -> tuple[pd.DataFrame, pd.DataFrame]:
         sep="\t",
         engine="python",
     )
+    print(f"  Loaded in {format_elapsed(time.time() - start)}")
     return all_experience, scp_data
 
 
 def filter_founder_owner_rows(all_experience: pd.DataFrame) -> pd.DataFrame:
+    start = time.time()
     owner_founder_columns = [
         col for col in all_experience.columns
-        if "own" in col.lower() or "found" in col.lower()
+        if ("own" in col.lower() or "found" in col.lower())
+        and "employee" not in col.lower()
+        and col not in ["flt_company_founder_start_year","flt_founder_job_from"]
     ]
 
     print(f"Potential founder/owner columns found: {len(owner_founder_columns)}")
@@ -101,14 +123,17 @@ def filter_founder_owner_rows(all_experience: pd.DataFrame) -> pd.DataFrame:
         return all_experience.copy()
 
     mask = all_experience[owner_founder_columns].any(axis=1)
+    all_experience['tagged_as_to_keep_founder'] = mask
     filtered = all_experience[mask].copy()
 
     print(f"Rows before founder/owner filter: {len(all_experience):,}")
     print(f"Rows after founder/owner filter:  {len(filtered):,}")
+    print(f"Filter completed in {format_elapsed(time.time() - start)}")
     return filtered
 
 
 def prepare_scp_earliest(scp_data: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+    start = time.time()
     scp = scp_data.copy()
 
     # Parse incdate and create a robust numeric incyear for earliest-row selection.
@@ -159,6 +184,7 @@ def prepare_scp_earliest(scp_data: pd.DataFrame) -> tuple[pd.DataFrame, pd.Serie
     if "incdate" in scp_earliest.columns:
         keep_cols.append("incdate")
 
+    print(f"SCP preparation completed in {format_elapsed(time.time() - start)}")
     return scp_earliest[keep_cols], scp_match_counts
 
 
@@ -168,6 +194,7 @@ def match_and_save(
     scp_match_counts: pd.Series,
     output_path: str,
 ) -> pd.DataFrame:
+    start = time.time()
     ae = all_experience.copy()
     ae["cs_company_name_norm"] = ae["company_name"].map(normalize_company_name)
 
@@ -186,9 +213,18 @@ def match_and_save(
     )
 
     matched_only = matched[matched["entityname_matched"].notna()].copy()
+    with pd.option_context("display.max_columns", None):        
+        print("\nSample matched rows:")
+        print(matched_only[['title','company_name']].head(10).to_string(index=False))
+        #pdb.set_trace()
 
+    
+        
+    save_start = time.time()
     matched_only.to_pickle(output_path)
     print(f"Saved matched output: {output_path}")
+    print(f"  Save completed in {format_elapsed(time.time() - save_start)}")
+    print(f"Match and save completed in {format_elapsed(time.time() - start)}")
 
     return matched_only
 
@@ -224,8 +260,33 @@ def print_diagnostics(
             if not non_null_years.empty:
                 print(f"Earliest matched incyear (min/max):        {int(non_null_years.min())} / {int(non_null_years.max())}")
 
-        print("\nTop 10 matched SCP entity names:")
-        print(matched_only["entityname_matched"].value_counts().head(10).to_string())
+        print("\nMatched SCP entity summary:")
+        summary = matched_only.groupby("entityname_matched", dropna=False).agg(
+            total_rows=("entityname_matched", "size"),
+        )
+
+        if "member_id" in matched_only.columns:
+            summary["unique_member_id"] = (
+                matched_only.groupby("entityname_matched", dropna=False)["member_id"].nunique()
+            )
+        else:
+            summary["unique_member_id"] = pd.NA
+
+        if {"dataid", "state"}.issubset(matched_only.columns):
+            dataid_state_pairs = matched_only[["entityname_matched", "dataid", "state"]].copy()
+            dataid_state_pairs["dataid_state_pair"] = list(
+                zip(dataid_state_pairs["dataid"], dataid_state_pairs["state"])
+            )
+            summary["unique_dataid_state_pairs"] = (
+                dataid_state_pairs.groupby("entityname_matched", dropna=False)["dataid_state_pair"].nunique()
+            )
+        else:
+            summary["unique_dataid_state_pairs"] = pd.NA
+
+        summary = summary.sort_values(by="total_rows", ascending=False)
+        print(summary.to_string())
+
+        
 
 
 def parse_args() -> argparse.Namespace:
@@ -254,13 +315,24 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    overall_start = time.time()
+    print("\n" + "=" * 80)
+    print("MATCH_TO_SCP_DATA: BEGIN")
+    print("=" * 80)
+
     args = parse_args()
     cfg = build_config(args)
 
+    print("\n[1/5] Loading data...")
     all_experience_raw, scp_raw = load_data(cfg)
+
+    print("\n[2/5] Filtering founder/owner rows...")
     all_experience_filtered = filter_founder_owner_rows(all_experience_raw)
 
+    print("\n[3/5] Preparing SCP earliest...")
     scp_earliest, scp_match_counts = prepare_scp_earliest(scp_raw)
+
+    print("\n[4/5] Matching and saving...")
     matched_only = match_and_save(
         all_experience=all_experience_filtered,
         scp_earliest=scp_earliest,
@@ -268,12 +340,19 @@ def main() -> None:
         output_path=cfg.output_path,
     )
 
+    print("\n[5/5] Printing diagnostics...")
     print_diagnostics(
         all_experience_raw=all_experience_raw,
         all_experience_filtered=all_experience_filtered,
         matched_only=matched_only,
         scp_match_counts=scp_match_counts,
     )
+
+    total_elapsed = time.time() - overall_start
+    print("\n" + "=" * 80)
+    print(f"MATCH_TO_SCP_DATA: COMPLETE")
+    print(f"Total execution time: {format_elapsed(total_elapsed)}")
+    print("=" * 80)
 
 
 if __name__ == "__main__":
