@@ -1055,7 +1055,6 @@ class SectionProcessors:
     def run_section_3(self, all_experience: pd.DataFrame) -> pd.DataFrame:
         section("Pipeline Section 3")
         all_experience = merge_company_founding_year(self.cfg, all_experience)
-        all_experience = merge_scp_match_data(self.cfg, all_experience)
         self.repository.persist_all_experience(all_experience)
         return all_experience
 

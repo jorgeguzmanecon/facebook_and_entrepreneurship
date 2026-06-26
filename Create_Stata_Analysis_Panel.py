@@ -32,6 +32,30 @@ from typing import Any
 import pandas as pd
 
 
+DROP_TOKENS = {
+    "a", "an", "the",
+    "and", "&", "of", "for", "to",
+    "co", "company",
+    "inc", "incorporated", "corp", "corporation",
+    "ltd", "limited", "llc", "plc", "lp", "llp",
+    "gmbh", "ag", "sa", "sas", "sarl", "bv", "nv",
+    "pte", "pty", "oy", "ab", "as",
+}
+
+
+def normalize_company_name(name: object) -> object:
+    if pd.isna(name):
+        return pd.NA
+
+    s = str(name).lower().strip()
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    tokens = [tok for tok in s.split() if tok and tok not in DROP_TOKENS]
+
+    if not tokens:
+        return pd.NA
+    return " ".join(tokens)
+
+
 def section(title: str) -> None:
     print("\n" + "=" * 100)
     print(title)
@@ -44,6 +68,7 @@ class Config:
 
     education_path: str = "coresignal_member_education_AnalysisFile_latest.pkl"
     experience_path: str = "all_experience_AnalysisFile_latest.pkl"
+    scp_match_analysis_path: str = "/shared/share_scp/coresignal/gitrepo_facebook2/all_experience_AnalysisFile_scp.pkl"
     member_profiles_path: str = "coresignal_member_profiles_AnalysisFile_latest.pkl"
 
     company_marketing_scores_path: str = "/shared/share_scp/coresignal/company_marketing_scores_latest.pkl"
@@ -78,6 +103,15 @@ class DataRepository:
             "experience": experience,
             "members": members,
         }
+
+    def load_scp_matches(self) -> pd.DataFrame | None:
+        if not os.path.exists(self.cfg.scp_match_analysis_path):
+            print(f"SCP match file not found, skipping merge: {self.cfg.scp_match_analysis_path}")
+            return None
+
+        scp = pd.read_pickle(self.cfg.scp_match_analysis_path)
+        print(f"Loaded SCP match rows: {len(scp):,}")
+        return scp
 
     def load_graduate_job_level(self, today_str: str) -> pd.DataFrame:
         path = f"graduates_with_education_job_level_{today_str}.pkl"
@@ -281,6 +315,57 @@ class StataPanelBuilder:
     repository: DataRepository
 
     @staticmethod
+    def _merge_scp_matches(df: pd.DataFrame, scp: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        scp = scp.copy()
+
+        if "company_name" not in out.columns:
+            print("company_name column missing, skipping SCP merge")
+            return out
+
+        if "company_name" not in scp.columns:
+            print("SCP match file missing company_name, skipping SCP merge")
+            return out
+
+        scp["company_name_norm"] = scp["company_name"].map(normalize_company_name)
+        scp["scp_founding_date"] = pd.to_datetime(scp["incdate"], errors="coerce") if "incdate" in scp.columns else pd.NaT
+        scp["scp_founding_year"] = (
+            pd.to_numeric(scp["scp_earliest_incyear"], errors="coerce").astype("Int64")
+            if "scp_earliest_incyear" in scp.columns
+            else pd.Series(pd.NA, index=scp.index, dtype="Int64")
+        )
+
+        keep_cols = ["company_name_norm"]
+        rename_map: dict[str, str] = {}
+        for col in ["entityname_matched", "scp_earliest_incyear", "jurisdiction", "scp_founding_date", "scp_founding_year"]:
+            if col in scp.columns:
+                keep_cols.append(col)
+
+        if "entityname_matched" in scp.columns:
+            rename_map["entityname_matched"] = "scp_entityname_matched"
+
+        scp = scp[keep_cols].rename(columns=rename_map)
+        scp = scp.sort_values(
+            by=["company_name_norm", "scp_founding_year", "scp_founding_date", "scp_entityname_matched"],
+            na_position="last",
+        )
+        scp = scp.drop_duplicates(subset=["company_name_norm"], keep="first")
+        scp["scp_is_matched"] = True
+        scp["scp_founding_month"] = scp["scp_founding_date"].dt.month.astype("Int64") if "scp_founding_date" in scp.columns else pd.Series(pd.NA, index=scp.index, dtype="Int64")
+        scp["scp_founding_quarter"] = scp["scp_founding_date"].dt.quarter.astype("Int64") if "scp_founding_date" in scp.columns else pd.Series(pd.NA, index=scp.index, dtype="Int64")
+
+        before_cols = set(out.columns)
+        out["company_name_norm"] = out["company_name"].map(normalize_company_name)
+        out = out.merge(scp, on="company_name_norm", how="left", validate="m:1")
+        out = out.drop(columns=["company_name_norm"], errors="ignore")
+        out["scp_is_matched"] = out["scp_is_matched"].fillna(False)
+
+        new_cols = sorted(set(out.columns) - before_cols)
+        print(f"Merged SCP match data. Added columns: {new_cols[:10]}{' ...' if len(new_cols) > 10 else ''}")
+        print(f"Non-null SCP matches: {int(out['scp_is_matched'].sum()):,}")
+        return out
+
+    @staticmethod
     def _make_time_window_flags(df: pd.DataFrame, cols: list[str]) -> tuple[pd.DataFrame, dict[str, str]]:
         out = df.copy()
         max_cols: dict[str, str] = {}
@@ -301,8 +386,8 @@ class StataPanelBuilder:
 
                 # SCP-based variant: only for SCP-matched firms with a known SCP founding year
                 scp_year_known = scp_is_matched & scp_founding_year.notna()
-                scp_cond = scp_founding_year.fillna(0).astype(int) <= (out["year_to"] + yrs)
-                out[f"{col}_{yrs}_years_s"] = out[col] & scp_year_known & scp_cond
+                scp_cond = scp_year_known & (scp_founding_year <= (out["year_to"] + yrs))
+                out[f"{col}_{yrs}_years_s"] = out[col] & scp_cond
 
                 max_cols[f"{col}_{yrs}_years_o"] = "max"
                 max_cols[f"{col}_{yrs}_years_p"] = "max"
@@ -338,6 +423,10 @@ class StataPanelBuilder:
 
         companies_probs = experience[["company_name", "fb_ad_prob"]].drop_duplicates(subset=["company_name"])
         g = g.merge(companies_probs, on="company_name", how="left")
+
+        scp_matches = self.repository.load_scp_matches()
+        if scp_matches is not None:
+            g = self._merge_scp_matches(g, scp_matches)
 
         found_own_columns = [c for c in experience.columns if "found" in c.lower() or "own" in c.lower()]
         cols = ["worked_as_engineer", "worked_in_sales"] + found_own_columns
