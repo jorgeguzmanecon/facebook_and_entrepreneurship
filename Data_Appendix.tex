@@ -1,0 +1,112 @@
+\documentclass[12pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{setspace}
+\usepackage{enumitem}
+\usepackage{hyperref}
+
+\setstretch{1.12}
+
+\title{Data Appendix: Construction of the Analysis Datasets}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Overview}
+
+This appendix explains how we build the analysis data from three scripts: \path{Create_Pandas_Datasets.py}, \path{Match_to_SCP_Data.py}, and \path{Create_Stata_Analysis_Panel.py}. It focuses on sample construction, variable definition, and timing rules. It does not walk through code line by line.
+
+The scripts run in sequence. First, we build a cleaned baseline experience file. Second, we match employers in that file to SCP legal entities. Third, we build the final person-level panel and Stata outputs. The order matters because each stage uses outputs from the previous stage.
+
+\section{Data Inputs and Core Units}
+
+\subsection{Input Sources}
+
+The pipeline uses both platform data and external legal data. The platform inputs are CoreSignal education and employment histories, which include degree text, school information, job titles, dates, and employer names. The external input is SCP legal-entity data, which include incorporation year and date fields. We also add company-level score variables and a first-name-based gender proxy.
+
+This setup lets us measure entrepreneurial timing in more than one way. We use job timing from observed careers, page-based founding metadata, and legal-record timing from SCP.
+
+\subsection{Observation Units Across Stages}
+
+The unit of observation changes over the pipeline. Early steps use education records and job episodes. Stage 3 merges these into event-level rows that combine schooling and work timing. We then collapse those rows to person-education cells for the main panel. We also keep a separate event-level cofounder file.
+
+\section{Stage 1: Baseline Dataset Construction}
+
+Stage 1 builds the baseline experience file. It starts with education files, removes duplicates, and filters degree text to keep mostly bachelor's and master's pathways. It also removes weak school metadata and keeps rows with usable subtitle text, since later steps use subtitle text for major coding.
+
+Next, Stage 1 loads employment files, combines them, and removes duplicates. It then aligns employment histories to the cleaned education sample. This step keeps the analysis sample consistent by focusing on members for whom we observe both education and work history.
+
+Stage 1 then creates founder and owner indicators from job titles. It uses explicit exclusion rules to avoid common false positives. For example, it avoids contexts where title text includes "owner" but does not indicate equity ownership. The script creates separate founder, owner, and cofounder/co-owner flags.
+
+The script also adds structure variables before output. It flags franchise-like patterns using firm-level founder/owner concentration and marks likely cofounder structures using bounded founder counts at the company-URL level.
+
+Finally, Stage 1 merges company-level score variables and company-page founding-year data. It cleans the page-based year values and drops implausible values. It also applies the "Isaac filter," which adjusts founder coding when role timing is internally inconsistent (for example, employee timing appearing earlier than founder timing in a way that conflicts with the coding logic). It then adds the first-name gender proxy with an "unknown" fallback.
+
+The output of Stage 1 is \path{all_experience_AnalysisFile_latest.pkl}, which serves as the canonical baseline experience file for the remaining stages.
+
+\section{Stage 2: Legal Entity Matching to SCP}
+
+Stage 2 links baseline employers to SCP legal entities so we can use legal incorporation timing. The script normalizes company names on both sides (CoreSignal and SCP): it lowercases names, removes punctuation, and drops common legal suffix terms. It then performs exact matching on the normalized key.
+
+Some normalized names map to multiple SCP entities. In those cases, the script picks one representative record by earliest incorporation timing. It resolves incorporation year from year fields or parsed dates, sorts candidates, and keeps the earliest record per normalized key. That record provides matched entity name, earliest incorporation year, and, when available, incorporation date and jurisdiction.
+
+The script focuses matching on rows with founder/owner signal. That focus keeps the task aligned with the main entrepreneurial outcomes and reduces unnecessary matching on unrelated rows. It also prints diagnostics, including match rates, ambiguous key counts, and non-missing incorporation-year coverage.
+
+Stage 2 writes \path{all_experience_AnalysisFile_scp.pkl}. This file augments the baseline file; it does not replace it.
+
+\section{Stage 3: Analysis Panel and Stata Files}
+
+Stage 3 builds the final panel and exports Stata files. It merges education and employment histories by member, removes duplicate merged rows, and creates event-level indicators. It includes role indicators (for example, engineering and sales) and founder timing windows relative to college completion.
+
+Stage 3 reports outcomes under three timing rules. \emph{Original} uses observed job timing. \emph{Page} uses company-page founding year when available and falls back to Original otherwise. \emph{SCP} uses legal-record founding year and only applies to firms with valid SCP matches and non-missing SCP timing. We do not impute SCP timing for unmatched firms.
+
+To build SCP outcomes, Stage 3 loads Stage 2 output and merges SCP fields using the same normalized company-name key. It also derives month and quarter from incorporation dates when available.
+
+After building event-level rows, Stage 3 collapses the data to person-education observations. It aggregates binary outcomes with a max operator and averages selected continuous covariates. It cleans major text and maps majors into broad categories for controls. It also creates a separate cofounder-event file for likely team-founding episodes.
+
+Finally, Stage 3 exports Stata datasets with shorter variable names where needed and with variable labels. The time-window labels explicitly show the timing source: ``(Original),'' ``(Page),'' and ``(SCP).''
+
+\section{Identification-Relevant Design Choices}
+
+Several design choices matter for empirical interpretation. First, we restrict employment rows to members with usable education data, so treatment and comparison groups come from a common sample frame. Second, founder coding uses conservative title rules to reduce false positives. Third, franchise-like and cofounder-structure flags support robustness checks that separate different ownership patterns.
+
+Most importantly, the final panel carries three firm-age timing measures in parallel (Original, Page, SCP). If estimates differ across these measures, that difference reflects a meaningful measurement choice. The SCP rule stays strict: unmatched firms do not receive positive SCP timing outcomes.
+
+\section{Key Output Artifacts}
+
+Table \ref{tab:outputs} summarizes the primary outputs generated across the three scripts.
+
+\begin{table}[h!]
+\centering
+\caption{Primary Pipeline Outputs}
+\label{tab:outputs}
+\small
+\begin{tabular}{p{0.36\linewidth}p{0.57\linewidth}}
+\toprule
+Output artifact & Economic interpretation \\
+\midrule
+\path{all_experience_AnalysisFile_latest.pkl} & Cleaned baseline employment panel with founder/owner flags, franchise/cofounder structure variables, company scores, and page-based founding-year fields. \\
+\path{all_experience_AnalysisFile_scp.pkl} & Rows with founder/owner signal that match to SCP legal entities, including earliest incorporation timing fields. \\
+\path{graduates_person_level_with_labels_DATE.dta} & Person-level panel with major categories and 3/5/10-year entrepreneurial timing outcomes under Original, Page, and SCP definitions. \\
+\path{cofounder_events_DATE.dta} & Event-level sample of likely cofounder episodes in firms with bounded founder counts. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Pipeline Ordering and Reproducibility}
+
+The required execution order is:
+\begin{enumerate}[leftmargin=1.5em]
+    \item \path{Create_Pandas_Datasets.py}
+    \item \path{Match_to_SCP_Data.py}
+    \item \path{Create_Stata_Analysis_Panel.py}
+\end{enumerate}
+
+This order follows the data dependencies. Stage 2 needs the baseline file from Stage 1. Stage 3 needs both Stage 1 output and the SCP match output from Stage 2. If you run the scripts out of order, you risk stale merges, missing legal-timing fields, and inconsistent samples.
+
+In short, the pipeline turns raw career histories into analysis-ready entrepreneurial outcomes with clear and labeled timing definitions.
+
+\end{document}
