@@ -285,6 +285,9 @@ class StataPanelBuilder:
         out = df.copy()
         max_cols: dict[str, str] = {}
 
+        scp_is_matched = out["scp_is_matched"].fillna(False) if "scp_is_matched" in out.columns else pd.Series(False, index=out.index)
+        scp_founding_year = out["scp_founding_year"] if "scp_founding_year" in out.columns else pd.Series(pd.NA, index=out.index, dtype="Int64")
+
         for col in cols:
             for yrs in [3, 5, 10]:
                 out[f"{col}_{yrs}_years_o"] = out[col] & (out["job_from"] <= (out["year_to"] + yrs))
@@ -296,8 +299,14 @@ class StataPanelBuilder:
 
                 out[f"{col}_{yrs}_years_p"] = out[col] & ((using_page_year & page_cond) | (~using_page_year & fallback_cond))
 
+                # SCP-based variant: only for SCP-matched firms with a known SCP founding year
+                scp_year_known = scp_is_matched & scp_founding_year.notna()
+                scp_cond = scp_founding_year.fillna(0).astype(int) <= (out["year_to"] + yrs)
+                out[f"{col}_{yrs}_years_s"] = out[col] & scp_year_known & scp_cond
+
                 max_cols[f"{col}_{yrs}_years_o"] = "max"
                 max_cols[f"{col}_{yrs}_years_p"] = "max"
+                max_cols[f"{col}_{yrs}_years_s"] = "max"
 
         return out, max_cols
 
@@ -477,17 +486,8 @@ class StataPanelPipeline:
     panel_builder: StataPanelBuilder
     cofounder_builder: CofounderBuilder
 
-    def run_section_2(self) -> pd.DataFrame:
-        data = self.panel_builder.build_graduate_panel()
-        graduates_with_education_job_level = data["graduates_with_education_job_level"]
-        graduates_person_level = data["graduates_person_level"]
-        today_str = date.today().strftime("%Y%m%d")
-
-        self.repository.save_graduate_job_level(graduates_with_education_job_level, today_str)
-
-        self.repository.save_graduates_person_level_pickle(graduates_person_level, today_str)
-        self.repository.save_graduates_person_level_stata(graduates_person_level, today_str)
-
+    @staticmethod
+    def _build_variable_labels(graduates_person_level: pd.DataFrame) -> dict[str, str]:
         variable_labels = {
             "linkedin_member_id": "Unique LinkedIn member identifier",
             "unitid": "University identification code from IPEDS database",
@@ -499,8 +499,40 @@ class StataPanelPipeline:
             "year_end_college": "Year the individual graduated from college",
         }
 
-        existing = set(graduates_person_level.columns)
-        final_labels = {k: v for k, v in variable_labels.items() if k in existing}
+        variable_labels = {k: v for k, v in variable_labels.items() if k in graduates_person_level.columns}
+
+        for col in graduates_person_level.columns:
+            match = re.match(r"^(?P<base>.+)_(?P<yrs>\d+)_years_(?P<variant>[ops])$", col)
+            if not match:
+                continue
+
+            base_col = match.group("base")
+            yrs = match.group("yrs")
+            variant = match.group("variant")
+
+            base_label = variable_labels.get(base_col, base_col.replace("_", " ").strip().capitalize())
+            suffix_label = {
+                "o": "(Original)",
+                "p": "(Page)",
+                "s": "(SCP)",
+            }[variant]
+
+            variable_labels[col] = f"{base_label} within {yrs} years {suffix_label}"
+
+        return variable_labels
+
+    def run_section_2(self) -> pd.DataFrame:
+        data = self.panel_builder.build_graduate_panel()
+        graduates_with_education_job_level = data["graduates_with_education_job_level"]
+        graduates_person_level = data["graduates_person_level"]
+        today_str = date.today().strftime("%Y%m%d")
+
+        self.repository.save_graduate_job_level(graduates_with_education_job_level, today_str)
+
+        self.repository.save_graduates_person_level_pickle(graduates_person_level, today_str)
+        self.repository.save_graduates_person_level_stata(graduates_person_level, today_str)
+
+        final_labels = self._build_variable_labels(graduates_person_level)
         self.repository.save_graduates_person_level_labeled_stata(graduates_person_level, today_str, final_labels)
         return graduates_person_level
 

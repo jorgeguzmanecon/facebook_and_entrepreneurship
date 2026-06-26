@@ -284,7 +284,7 @@ def print_diagnostics(
             summary["unique_dataid_state_pairs"] = pd.NA
 
         summary = summary.sort_values(by="total_rows", ascending=False)
-        print(summary.to_string())
+        print(summary.head(40).to_string())
 
         
 

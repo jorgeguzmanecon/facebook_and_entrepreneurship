@@ -37,6 +37,17 @@ import numpy as np
 import pandas as pd
 
 
+DROP_TOKENS = {
+    "a", "an", "the",
+    "and", "&", "of", "for", "to",
+    "co", "company",
+    "inc", "incorporated", "corp", "corporation",
+    "ltd", "limited", "llc", "plc", "lp", "llp",
+    "gmbh", "ag", "sa", "sas", "sarl", "bv", "nv",
+    "pte", "pty", "oy", "ab", "as",
+}
+
+
 # =============================
 # Overview
 # =============================
@@ -53,6 +64,7 @@ class Config:
 
     education_analysis_path: str = "/shared/share_scp/coresignal/coresignal_member_education_AnalysisFile_latest.pkl"
     experience_analysis_path: str = "/shared/share_scp/coresignal/all_experience_AnalysisFile_latest.pkl"
+    scp_match_analysis_path: str = "/shared/share_scp/coresignal/gitrepo_facebook2/all_experience_AnalysisFile_scp.pkl"
 
     split_education_out: str = "/shared/share_scp/coresignal/gitrepo_facebook2/coresignal_member_education_AnalysisFile_latest.pkl.gz"
     split_experience_out: str = "/shared/share_scp/coresignal/gitrepo_facebook2/all_experience_AnalysisFile_latest.pkl.gz"
@@ -81,6 +93,19 @@ def preview_counts(series: pd.Series, name: str, n: int = 10) -> None:
     print(f"\n[{name}] top {n} value counts")
     vc = series.value_counts(dropna=False).head(n)
     print(vc.to_string())
+
+
+def normalize_company_name(name: object) -> object:
+    if pd.isna(name):
+        return pd.NA
+
+    cleaned = str(name).lower().strip()
+    cleaned = re.sub(r"[^a-z0-9]+", " ", cleaned)
+    tokens = [tok for tok in cleaned.split() if tok and tok not in DROP_TOKENS]
+
+    if not tokens:
+        return pd.NA
+    return " ".join(tokens)
 
 
 def load_pickle_parallel(filepaths: list[str], max_workers: int = 8) -> list[pd.DataFrame]:
@@ -704,6 +729,100 @@ def merge_company_founding_year(cfg: Config, all_experience: pd.DataFrame) -> pd
     return out
 
 
+def merge_scp_match_data(cfg: Config, all_experience: pd.DataFrame) -> pd.DataFrame:
+    section("3.x Merge SCP matched firms")
+
+    out = all_experience.copy()
+    if not os.path.exists(cfg.scp_match_analysis_path):
+        print(f"SCP match pickle not found, skipping merge: {cfg.scp_match_analysis_path}")
+        return out
+
+    scp = pd.read_pickle(cfg.scp_match_analysis_path)
+    print(f"Loaded SCP match rows: {len(scp):,}")
+
+    if "company_name" not in out.columns:
+        print("company_name column missing, skipping SCP merge")
+        return out
+
+    if "company_name" not in scp.columns:
+        print("SCP match file missing company_name, skipping SCP merge")
+        return out
+
+    scp = scp.copy()
+    scp["company_name_norm"] = scp["company_name"].map(normalize_company_name)
+    scp["scp_founding_date"] = pd.to_datetime(scp["incdate"], errors="coerce") if "incdate" in scp.columns else pd.NaT
+    scp["scp_founding_year"] = pd.to_numeric(scp["scp_earliest_incyear"], errors="coerce").astype("Int64") if "scp_earliest_incyear" in scp.columns else pd.Series(pd.NA, index=scp.index, dtype="Int64")
+
+    keep_cols = ["company_name_norm"]
+    rename_map = {}
+    for col in ["entityname_matched", "scp_earliest_incyear", "jurisdiction", "scp_founding_date", "scp_founding_year"]:
+        if col in scp.columns:
+            keep_cols.append(col)
+
+    if "entityname_matched" in scp.columns:
+        rename_map["entityname_matched"] = "scp_entityname_matched"
+    if "scp_earliest_incyear" in scp.columns:
+        rename_map["scp_earliest_incyear"] = "scp_earliest_incyear"
+
+    scp = scp[keep_cols].rename(columns=rename_map)
+    scp = scp.sort_values(
+        by=["company_name_norm", "scp_founding_year", "scp_founding_date", "scp_entityname_matched"],
+        na_position="last",
+    )
+    scp = scp.drop_duplicates(subset=["company_name_norm"], keep="first")
+
+    scp["scp_is_matched"] = True
+    scp["scp_founding_month"] = scp["scp_founding_date"].dt.month.astype("Int64") if "scp_founding_date" in scp.columns else pd.Series(pd.NA, index=scp.index, dtype="Int64")
+    scp["scp_founding_quarter"] = scp["scp_founding_date"].dt.quarter.astype("Int64") if "scp_founding_date" in scp.columns else pd.Series(pd.NA, index=scp.index, dtype="Int64")
+
+    before_cols = set(out.columns)
+    out = out.copy()
+    out["company_name_norm"] = out["company_name"].map(normalize_company_name)
+    out = out.merge(scp, on="company_name_norm", how="left", validate="m:1")
+    out = out.drop(columns=["company_name_norm"], errors="ignore")
+    out["scp_is_matched"] = out["scp_is_matched"].fillna(False)
+
+    new_cols = sorted(set(out.columns) - before_cols)
+    print(f"Merged SCP match data. Added columns: {new_cols[:10]}{' ...' if len(new_cols) > 10 else ''}")
+    print(f"Non-null SCP matches: {int(out['scp_is_matched'].sum()):,}")
+
+    matched = out[out["scp_is_matched"]].copy()
+    if not matched.empty and "scp_entityname_matched" in matched.columns:
+        print("\nSCP merge diagnostics:")
+        print(f"Rows in all_experience:                 {len(out):,}")
+        print(f"Rows matched to SCP:                   {len(matched):,}")
+        print(f"Unique matched SCP entities:          {matched['scp_entityname_matched'].nunique(dropna=True):,}")
+        print(f"Match rate:                            {len(matched) / len(out):.2%}" if len(out) else "Match rate:                            n/a")
+
+        diag = matched.groupby("scp_entityname_matched", dropna=False).agg(
+            total_rows=("scp_entityname_matched", "size"),
+        )
+
+        if "member_id" in matched.columns:
+            diag["unique_member_id"] = matched.groupby("scp_entityname_matched", dropna=False)["member_id"].nunique()
+        else:
+            diag["unique_member_id"] = pd.NA
+
+        if {"dataid", "state"}.issubset(matched.columns):
+            pairs = matched[["scp_entityname_matched", "dataid", "state"]].copy()
+            pairs["dataid_state_pair"] = list(zip(pairs["dataid"], pairs["state"]))
+            diag["unique_dataid_state_pairs"] = pairs.groupby("scp_entityname_matched", dropna=False)["dataid_state_pair"].nunique()
+        else:
+            diag["unique_dataid_state_pairs"] = pd.NA
+
+        if "scp_founding_date" in matched.columns:
+            non_null_founding_date = matched["scp_founding_date"].notna().sum()
+            print(f"Rows with non-null scp_founding_date:  {int(non_null_founding_date):,}")
+        if "scp_founding_year" in matched.columns:
+            non_null_founding_year = matched["scp_founding_year"].notna().sum()
+            print(f"Rows with non-null scp_founding_year:   {int(non_null_founding_year):,}")
+
+        print("\nTop matched SCP entities:")
+        print(diag.sort_values("total_rows", ascending=False).head(10).to_string())
+
+    return out
+
+
 # =============================
 # 4. Do filtering of founder measures following Isaac's idea
 # =============================
@@ -936,6 +1055,7 @@ class SectionProcessors:
     def run_section_3(self, all_experience: pd.DataFrame) -> pd.DataFrame:
         section("Pipeline Section 3")
         all_experience = merge_company_founding_year(self.cfg, all_experience)
+        all_experience = merge_scp_match_data(self.cfg, all_experience)
         self.repository.persist_all_experience(all_experience)
         return all_experience
 
